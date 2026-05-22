@@ -24,16 +24,15 @@ int mdelay = 5;
 Leg *legs[6];
 
 Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
-                           float stepLength, float stepHeight) {
+                           float stepLength, float stepHeight, float yOffset) {
   // Ensure phase stays strictly wrapped between 0.0 and 1.0
   phase = phase - floor(phase);
 
   Vector3 targetPos;
 
-  // Y-axis: To walk forward, the leg swings forward in the air, and pushes
-  // backward on the ground.
-  float yLiftoff = -stepLength / 2.0;  // Back of the stride
-  float yTouchdown = stepLength / 2.0; // Front of the stride
+  // NEW: Shift the entire stride forward or backward along the Y-axis
+  float yLiftoff = (-stepLength / 2.0) + yOffset;  // Back of the stride
+  float yTouchdown = (stepLength / 2.0) + yOffset; // Front of the stride
   float zGround = -standingHeight;
 
   // ---------------------------------------------------------
@@ -42,20 +41,18 @@ Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
   if (phase < 0.5) {
     float t = phase * 2.0;
 
-    // 1. KINEMATIC SMOOTHING: Cosine Ease-in / Ease-out
-    // Forces velocity to 0 at the corners to eliminate jerks
+    // Kinematic smoothing
     float easedT = (1.0 - cos(t * PI)) / 2.0;
 
-    // 2. GEOMETRIC SMOOTHING: Align P1 and P2 vertically
+    // Geometric control points
     Vector3 P0(defaultX, yLiftoff, zGround);
     Vector3 P3(defaultX, yTouchdown, zGround);
 
     float zControl = zGround + (stepHeight * 1.333);
-    Vector3 P1(defaultX, yLiftoff, zControl); // Pulls straight up from liftoff
-    Vector3 P2(defaultX, yTouchdown,
-               zControl); // Drops straight down to touchdown
+    Vector3 P1(defaultX, yLiftoff, zControl);
+    Vector3 P2(defaultX, yTouchdown, zControl);
 
-    // Calculate curve using the eased time variable
+    // Bezier curve calculation
     float invT = 1.0 - easedT;
     targetPos = P0 * (invT * invT * invT) + P1 * (3.0 * invT * invT * easedT) +
                 P2 * (3.0 * invT * easedT * easedT) +
@@ -67,10 +64,8 @@ Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
   else {
     float t = (phase - 0.5) * 2.0;
 
-    // Apply the exact same smoothing to the ground phase
     float easedT = (1.0 - cos(t * PI)) / 2.0;
 
-    // Move linearly from the front (touchdown) back to the rear (liftoff)
     float currentY = yTouchdown + (yLiftoff - yTouchdown) * easedT;
     targetPos = Vector3(defaultX, currentY, zGround);
   }
@@ -168,62 +163,67 @@ void loop() {
   static int sequenceState = 0;
   static unsigned long lastActionTime = 0;
 
-  // STEP 1: Boot up and move to Idle (Tucked in)
+  // NEW: Custom X-distance for each leg.
+  // Corner legs (0, 2, 3, 5) are pushed out to 130mm.
+  // Middle legs (1, 4) stay at 100mm.
+  float stanceRadius[6] = {80, 50.0, 80, 50, 80, 50};
+
+  // STEP 1: Boot up and move to Idle
   if (sequenceState == 0) {
-    Vector3 idle = Vector3(75, 0.0, 0.0);
     for (int i = 0; i < 6; i++) {
+      // Pull the idle pose slightly closer than the standing radius
+      Vector3 idle = Vector3(stanceRadius[i] - 25.0, 0.0, 0.0);
       legs[i]->setTarget(idle, 1000);
     }
     lastActionTime = millis();
     sequenceState = 1;
   }
 
-  // STEP 2: Stand up (Wait 1000ms after Step 1)
+  // STEP 2: Stand up
   else if (sequenceState == 1 && (millis() - lastActionTime >= 1000)) {
-    Vector3 stand = Vector3(100, 0.0, -80);
     for (int i = 0; i < 6; i++) {
+      // Stand at the designated custom radius
+      Vector3 stand = Vector3(stanceRadius[i], 0.0, -80.0);
       legs[i]->setTarget(stand, 1000);
     }
     lastActionTime = millis();
     sequenceState = 2;
   }
 
-  // STEP 3: Begin Walking (Wait 1000ms after Step 2)
+  // STEP 3: Lock into Walking Mode
   else if (sequenceState == 2 && (millis() - lastActionTime >= 1000)) {
-    sequenceState = 3; // Lock into the continuous walking state
+    sequenceState = 3;
   }
 
-  // THE WALKING ENGINE (Runs continuously once State 3 is reached)
+  // THE WALKING ENGINE
   if (sequenceState == 3) {
-    unsigned long cycleTime = 2000; // 2 seconds per full stride
+    unsigned long cycleTime = 2000;
     float globalPhase = (float)(millis() % cycleTime) / cycleTime;
 
-    // The Tripod Phase Offsets
     float phaseOffsets[6] = {0.0, 0.5, 0.0, 0.5, 0.0, 0.5};
+    float legRotations[6] = {56.3, 0.0, -56.3, 56.3, 0.0, -56.3};
+    float strideOffsets[6] = {-40.0, 0.0, 40.0, -40.0, 0.0, 40.0};
+
+    Vector2 shoulderPivot = Vector2(-31.4, 0.0);
 
     for (int i = 0; i < 6; i++) {
-      // Add the leg's specific offset to the global clock
       float legPhase = globalPhase + phaseOffsets[i];
-
-      // Wrap the phase so it always stays between 0.0 and 1.0
-      if (legPhase >= 1.0) {
+      if (legPhase >= 1.0)
         legPhase -= 1.0;
-      }
 
-      // Generate the exact coordinate (X=100, Z_stand=80, Stride=100, Lift=40)
-      Vector3 point = generateTrajectory(legPhase, 100.0, 80.0, 100.0, 40.0);
+      // Pass the custom stanceRadius[i] into the trajectory generator
+      Vector3 point = generateTrajectory(legPhase, stanceRadius[i], 80.0, 90,
+                                         40.0, strideOffsets[i]);
 
-      // Push instantly to the hardware (the Leg class handles the 50Hz
-      // limiting)
+      point = point.rotate(legRotations[i], shoulderPivot);
       legs[i]->setInstantIK(point);
     }
   } else {
-    // Only run the point-to-point interpolator if we are in States 1 or 2
+    // Run the interpolator for States 1 and 2
     for (int i = 0; i < 6; i++) {
       legs[i]->update();
     }
   }
 
-  // Always listen for serial commands
   handleSerialCommands();
 }

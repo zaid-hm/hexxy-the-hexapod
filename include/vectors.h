@@ -46,14 +46,14 @@ public:
     return result;
   }
 
-  Vector2 rotate(int angle, Vector2 pivot) {
+  Vector2 rotate(float angle, Vector2 pivot) {
     // Translate line so pivot point is at the origin
     x -= pivot.x;
     y -= pivot.y;
-
+    float angleRad = radians(angle);
     // Rotate point by angle
-    int x_rotated = x * cos(angle) - y * sin(angle);
-    int y_rotated = x * sin(angle) + y * cos(angle);
+    float x_rotated = x * cos(angle) - y * sin(angle);
+    float y_rotated = x * sin(angle) + y * cos(angle);
 
     // Translate point back to original position
     x = x_rotated + pivot.x;
@@ -113,7 +113,7 @@ public:
     return ret;
   }
 
-  Vector3 rotate(int angle, Vector2 pivot) {
+  Vector3 rotate(float angle, Vector2 pivot) {
     // Translate line so pivot point is at the origin
     if (angle == 0)
       return Vector3(x, y, z);
@@ -123,8 +123,8 @@ public:
     float angleRad = radians(angle);
 
     // Rotate point by angle
-    int x_rotated = x * cos(angleRad) - y * sin(angleRad);
-    int y_rotated = x * sin(angleRad) + y * cos(angleRad);
+    float x_rotated = x * cos(angleRad) - y * sin(angleRad);
+    float y_rotated = x * sin(angleRad) + y * cos(angleRad);
 
     // Translate point back to original position
     x = x_rotated + pivot.x;
