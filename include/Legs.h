@@ -76,8 +76,17 @@ public:
   }
 
   // Instantly calculate and move to a Cartesian coordinate
+  // Instantly calculate and move to a Cartesian coordinate
   void setInstantIK(Vector3 target) {
-    isMoving = false; // Turn off the point-to-point interpolator
+    unsigned long currentMillis = millis();
+
+    // rotect the I2C bus! Drop the frame if it's too soon.
+    if (currentMillis - lastFrameTime < FRAME_INTERVAL) {
+      return;
+    }
+
+    lastFrameTime = currentMillis; // Reset the leg's internal timer
+    isMoving = false;              // Turn off the point-to-point interpolator
     currentPos = target;
 
     float x = currentPos.x;
@@ -101,7 +110,6 @@ public:
     pwmBoard->setPWM(pinFemur, 0, angleToPulse(a2 + offFemur, invFemur));
     pwmBoard->setPWM(pinTibia, 0, angleToPulse(a3 + offTibia, invTibia));
   }
-
   // Calculate IK and write to the servo driver smoothly over time
   void update() {
     if (!isMoving)

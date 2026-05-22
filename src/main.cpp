@@ -86,21 +86,20 @@ void setup() {
   sb2.setPWMFreq(60);
 
   // Right Side (Board 1)
-  legs[0] = new Leg(&sb1, 0, 1, 2, 95.0, 110.0, 22.0 + 11.3 - 90, true, false,
-                    true); // Leg 1 (Top-Right)
-  legs[1] = new Leg(&sb1, 8, 9, 10, 90.0, 75.0, 7.0 + 11.3 - 90, true, false,
-                    true); // Leg 2 (Mid-Right)
-  legs[2] = new Leg(&sb1, 12, 13, 14, 135.0, 85, 45.0 + 11.3 - 90, true, false,
-                    true); // Leg 3 (Bottom-Right)
+  legs[0] = new Leg(&sb1, 0, 1, 3, 95.0, 110.0 + 23, 22.0 - 20 + 11.3 - 90,
+                    true, false, true); // Leg 1 (Top-Right)
+  legs[1] = new Leg(&sb1, 4, 5, 6, 90.0 - 10, 75.0 + 20, 7.0 - 19 + 11.3 - 90,
+                    true, false, true); // Leg 2 (Mid-Right)
+  legs[2] = new Leg(&sb1, 8, 9, 11, 135.0 - 10, 85 + 15, 45.0 - 19 + 11.3 - 90,
+                    true, false, true); // Leg 3 (Bottom-Right)
 
   // Left Side (Board 2)
   legs[3] = new Leg(&sb2, 0, 1, 3, 110.0, 110.0, 13.0 + 11.3 - 90, false, false,
                     true); // Leg 4 (Top-Left)
-  legs[4] = new Leg(&sb2, 4, 5, 6, 80.0, 65.0, 17 + 11.3 - 90, false, false,
+  legs[4] = new Leg(&sb2, 4, 5, 7, 80.0, 65.0, 17 + 11.3 - 90, false, false,
                     true); // Leg 5 (Mid-Left)
-  legs[5] =
-      new Leg(&sb2, 12, 13, 14, 82.0, 60.0, 32.0 + 11.3 - 90, false, false,
-              true); // Leg 6 (Bottom-Left)
+  legs[5] = new Leg(&sb2, 8, 9, 11, 82.0 - 5, 60.0 + 5, 32.0 + 11.3 - 90, false,
+                    false, true); // Leg 6 (Bottom-Left)
   Serial.println("For Angles:    A,Leg,Coxa,Femur,Tibia  (e.g., A,0,90,90,90)");
   Serial.println(
       "For Cartesian: C,Leg,X,Y,Z             (e.g., C,0,150,0,-50)");
@@ -166,20 +165,65 @@ void handleSerialCommands() {
 }
 
 void loop() {
-  static unsigned long lastFrameTime = 0;
-  unsigned long currentTime = millis();
-  Vector3 idle = Vector3(100, 0, -50);
-  // if (currentTime - lastFrameTime >= 20) {
-  //   lastFrameTime = currentTime;
-  //   // unsigned long cycleTime = 2000;
-  //   // float currentPhase = (float)(currentTime % cycleTime) / cycleTime;
-  //   // Vector3 point = generateTrajectory(currentPhase, 150.0, 50.0,
-  //   100.0, 40.0);
-  // }
-  for (int i = 0; i < 6; i++) {
-    legs[i]->setTarget(idle, 1);
-    legs[i]->update();
+  static int sequenceState = 0;
+  static unsigned long lastActionTime = 0;
+
+  // STEP 1: Boot up and move to Idle (Tucked in)
+  if (sequenceState == 0) {
+    Vector3 idle = Vector3(75, 0.0, 0.0);
+    for (int i = 0; i < 6; i++) {
+      legs[i]->setTarget(idle, 1000);
+    }
+    lastActionTime = millis();
+    sequenceState = 1;
   }
+
+  // STEP 2: Stand up (Wait 1000ms after Step 1)
+  else if (sequenceState == 1 && (millis() - lastActionTime >= 1000)) {
+    Vector3 stand = Vector3(100, 0.0, -80);
+    for (int i = 0; i < 6; i++) {
+      legs[i]->setTarget(stand, 1000);
+    }
+    lastActionTime = millis();
+    sequenceState = 2;
+  }
+
+  // STEP 3: Begin Walking (Wait 1000ms after Step 2)
+  else if (sequenceState == 2 && (millis() - lastActionTime >= 1000)) {
+    sequenceState = 3; // Lock into the continuous walking state
+  }
+
+  // THE WALKING ENGINE (Runs continuously once State 3 is reached)
+  if (sequenceState == 3) {
+    unsigned long cycleTime = 2000; // 2 seconds per full stride
+    float globalPhase = (float)(millis() % cycleTime) / cycleTime;
+
+    // The Tripod Phase Offsets
+    float phaseOffsets[6] = {0.0, 0.5, 0.0, 0.5, 0.0, 0.5};
+
+    for (int i = 0; i < 6; i++) {
+      // Add the leg's specific offset to the global clock
+      float legPhase = globalPhase + phaseOffsets[i];
+
+      // Wrap the phase so it always stays between 0.0 and 1.0
+      if (legPhase >= 1.0) {
+        legPhase -= 1.0;
+      }
+
+      // Generate the exact coordinate (X=100, Z_stand=80, Stride=100, Lift=40)
+      Vector3 point = generateTrajectory(legPhase, 100.0, 80.0, 100.0, 40.0);
+
+      // Push instantly to the hardware (the Leg class handles the 50Hz
+      // limiting)
+      legs[i]->setInstantIK(point);
+    }
+  } else {
+    // Only run the point-to-point interpolator if we are in States 1 or 2
+    for (int i = 0; i < 6; i++) {
+      legs[i]->update();
+    }
+  }
+
+  // Always listen for serial commands
   handleSerialCommands();
-  Serial.println(legs[1]->currentPos.z);
 }
