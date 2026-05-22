@@ -25,6 +25,14 @@ float globalWalkAngle = 0.0;
 float globalStrideLength = 0.0;
 float globalRotationSpeed = 0.0;
 
+float globalPitch = 0.0; // Degrees: Positive = Nose Up, Negative = Nose Down
+float globalRoll = 0.0;  // Degrees: Positive = Tilt Right, Negative = Tilt Left
+float globalRideHeight = 0.0; // mm: Shift the whole body up or down
+                              //
+// Positive Y is forward, Negative Y is backward. Positive X is right, Negative
+// X is left.
+float bodyOffsetY[6] = {121.0, 0.0, -121.0, 121.0, 0.0, -121.0};
+float bodyOffsetX[6] = {80.7, 97.3, 80.7, -80.7, -97.3, -80.7};
 Leg *legs[6];
 
 Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
@@ -107,17 +115,15 @@ void setup() {
 void handleSerialCommands() {
   if (Serial.available() > 0) {
     String input = Serial.readStringUntil('\n');
-    input.trim(); // Remove stray whitespace
+    input.trim();
 
     char cmdType;
     int legIdx;
     float v1, v2, v3;
 
-    // Parse format: Type, LegIndex, Value1, Value2, Value3
     if (sscanf(input.c_str(), "%c,%d,%f,%f,%f", &cmdType, &legIdx, &v1, &v2,
                &v3) == 5) {
 
-      // Validate the leg index
       if (legIdx < 0 || legIdx > 5) {
         Serial.println("Error: Leg index must be between 0 and 5.");
         return;
@@ -126,7 +132,6 @@ void handleSerialCommands() {
       // 'A' or 'a' for direct Angle control
       if (cmdType == 'A' || cmdType == 'a') {
         legs[legIdx]->setAngles(v1, v2, v3);
-
         Serial.print("Leg ");
         Serial.print(legIdx);
         Serial.print(" ANGLES set to -> Coxa: ");
@@ -138,9 +143,7 @@ void handleSerialCommands() {
       }
       // 'C' or 'c' for Cartesian IK control
       else if (cmdType == 'C' || cmdType == 'c') {
-        // Move to the target XYZ over 1000 milliseconds
         legs[legIdx]->setTarget(Vector3(v1, v2, v3), 1000);
-
         Serial.print("Leg ");
         Serial.print(legIdx);
         Serial.print(" TARGET set to -> X: ");
@@ -149,28 +152,43 @@ void handleSerialCommands() {
         Serial.print(v2);
         Serial.print(" | Z: ");
         Serial.println(v3);
-      } else if (cmdType == 'V' || cmdType == 'v') {
+      }
+      // 'V' or 'v' for Velocity Control (Omnidirectional + Rotation)
+      else if (cmdType == 'V' || cmdType == 'v') {
         globalWalkAngle = v1;
         globalStrideLength = v2;
         globalRotationSpeed = v3;
+
         Serial.print("ROBOT VELOCITY -> Angle: ");
         Serial.print(globalWalkAngle);
         Serial.print(" deg | Speed: ");
-        Serial.println(globalStrideLength);
+        Serial.print(globalStrideLength);
         Serial.print(" | Rotation: ");
         Serial.println(globalRotationSpeed);
+      }
+      // 'P' or 'p' for Posture Control (Pitch, Roll, Ride Height)
+      else if (cmdType == 'P' || cmdType == 'p') {
+        globalPitch = v1;
+        globalRoll = v2;
+        globalRideHeight = v3;
+
+        Serial.print("ROBOT POSTURE -> Pitch: ");
+        Serial.print(globalPitch);
+        Serial.print(" deg | Roll: ");
+        Serial.print(globalRoll);
+        Serial.print(" deg | Ride Height: ");
+        Serial.println(globalRideHeight);
       } else {
-        Serial.println("Error: Unknown command type. Use 'A' or 'C' or 'V'.");
+        Serial.println("Error: Unknown command type. Use A, C, V, or P.");
       }
 
     } else {
       Serial.println("Invalid format!");
+      Serial.println("Angles:    A,Leg,Coxa,Femur,Tibia  (e.g., A,0,90,90,90)");
       Serial.println(
-          "For Angles:    A,Leg,Coxa,Femur,Tibia        (e.g., A,0,90,90,90)");
-      Serial.println(
-          "For Cartesian: C,Leg,X,Y,Z                   (e.g., C,0,150,0,-50)");
-      Serial.println(
-          "For Velocity:  V,0,Angle,stepLength,rotation (e.g., V,0,90,100,0)");
+          "Cartesian: C,Leg,X,Y,Z             (e.g., C,0,150,0,-50)");
+      Serial.println("Velocity:  V,0,Angle,Speed,Rot     (e.g., V,0,90,100,0)");
+      Serial.println("Posture:   P,0,Pitch,Roll,Height   (e.g., P,0,15,0,-20)");
     }
   }
 }
@@ -253,18 +271,36 @@ void loop() {
       // Using atan2(X, Y) perfectly maps our compass (0 = Forward, 90 = Right)
       float finalAngle = degrees(atan2(finalX, finalY));
 
-      // 5. Generate the Trajectory using the calculated final speed
+      // 5. Generate the Trajectory
       float liftHeight = (finalSpeed > 5.0) ? 40.0 : 0.0;
       Vector3 point =
           generateTrajectory(legPhase, stanceRadius[i], 80.0, finalSpeed,
                              liftHeight, strideOffsets[i]);
 
-      // 6. Flip the angle for the Left Side, then apply Rotations
+      // 6. Apply Yaw and Leg Rotations
       float localWalkAngle = finalAngle * sideMultiplier[i];
-
       Vector2 footRestingCenter(stanceRadius[i], strideOffsets[i]);
       point = point.rotate(localWalkAngle, footRestingCenter);
       point = point.rotate(legRotations[i], shoulderPivot);
+
+      // -------------------------------------------------------------------
+      // 7. NEW: Apply Body Kinematics (Pitch, Roll, and Ride Height)
+      // -------------------------------------------------------------------
+
+      // Ride Height: Simply shift the Z target up or down
+      point.z -= globalRideHeight;
+
+      // Pitch: If the shoulder is far forward (Positive Y) and the body pitches
+      // UP, the shoulder physically rises. We must push the foot target DOWN
+      // (negative Z) to compensate.
+      float pitchShift = bodyOffsetY[i] * sin(radians(globalPitch));
+      point.z += pitchShift;
+
+      // Roll: If the shoulder is far right (Positive X) and the body rolls
+      // RIGHT, the shoulder physically drops. We must pull the foot target UP
+      // (positive Z) to compensate.
+      float rollShift = bodyOffsetX[i] * sin(radians(globalRoll));
+      point.z -= rollShift;
 
       legs[i]->setInstantIK(point);
     }
