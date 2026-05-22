@@ -21,6 +21,10 @@ float coxa = 31.0;
 
 int mdelay = 5;
 
+float globalWalkAngle = 0.0;
+float globalStrideLength = 0.0;
+float globalRotationSpeed = 0.0;
+
 Leg *legs[6];
 
 Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
@@ -145,16 +149,28 @@ void handleSerialCommands() {
         Serial.print(v2);
         Serial.print(" | Z: ");
         Serial.println(v3);
+      } else if (cmdType == 'V' || cmdType == 'v') {
+        globalWalkAngle = v1;
+        globalStrideLength = v2;
+        globalRotationSpeed = v3;
+        Serial.print("ROBOT VELOCITY -> Angle: ");
+        Serial.print(globalWalkAngle);
+        Serial.print(" deg | Speed: ");
+        Serial.println(globalStrideLength);
+        Serial.print(" | Rotation: ");
+        Serial.println(globalRotationSpeed);
       } else {
-        Serial.println("Error: Unknown command type. Use 'A' or 'C'.");
+        Serial.println("Error: Unknown command type. Use 'A' or 'C' or 'V'.");
       }
 
     } else {
       Serial.println("Invalid format!");
       Serial.println(
-          "For Angles:    A,Leg,Coxa,Femur,Tibia  (e.g., A,0,90,90,90)");
+          "For Angles:    A,Leg,Coxa,Femur,Tibia        (e.g., A,0,90,90,90)");
       Serial.println(
-          "For Cartesian: C,Leg,X,Y,Z             (e.g., C,0,150,0,-50)");
+          "For Cartesian: C,Leg,X,Y,Z                   (e.g., C,0,150,0,-50)");
+      Serial.println(
+          "For Velocity:  V,0,Angle,stepLength,rotation (e.g., V,0,90,100,0)");
     }
   }
 }
@@ -196,13 +212,21 @@ void loop() {
   }
 
   // THE WALKING ENGINE
+
   if (sequenceState == 3) {
     unsigned long cycleTime = 2000;
     float globalPhase = (float)(millis() % cycleTime) / cycleTime;
 
     float phaseOffsets[6] = {0.0, 0.5, 0.0, 0.5, 0.0, 0.5};
     float legRotations[6] = {56.3, 0.0, -56.3, 56.3, 0.0, -56.3};
+    float stanceRadius[6] = {80, 50, 80, 80, 50, 80};
     float strideOffsets[6] = {-40.0, 0.0, 40.0, -40.0, 0.0, 40.0};
+    float sideMultiplier[6] = {1.0, 1.0, 1.0, -1.0, -1.0, -1.0};
+
+    // NEW: The tangent angle each foot must travel to rotate the body Clockwise
+    // E.g., The Mid-Right leg (1) must walk backward (180 deg) to spin the body
+    // CW.
+    float tangentAngles[6] = {135.0, 180.0, -135.0, 45.0, 0.0, -45.0};
 
     Vector2 shoulderPivot = Vector2(-31.4, 0.0);
 
@@ -211,17 +235,38 @@ void loop() {
       if (legPhase >= 1.0)
         legPhase -= 1.0;
 
-      // Pass the custom stanceRadius[i] into the trajectory generator
-      Vector3 point = generateTrajectory(legPhase, stanceRadius[i], 80.0, 90,
-                                         40.0, strideOffsets[i]);
+      // 1. Calculate Global Translation Vector (X = Right, Y = Forward)
+      float transX = sin(radians(globalWalkAngle)) * globalStrideLength;
+      float transY = cos(radians(globalWalkAngle)) * globalStrideLength;
 
+      // 2. Calculate Global Rotation Vector
+      float rotX = sin(radians(tangentAngles[i])) * globalRotationSpeed;
+      float rotY = cos(radians(tangentAngles[i])) * globalRotationSpeed;
+
+      // 3. Sum the Vectors to get the Final Travel Path for this specific leg
+      float finalX = transX + rotX;
+      float finalY = transY + rotY;
+
+      // 4. Convert back to a final Speed and Angle
+      float finalSpeed = sqrt(finalX * finalX + finalY * finalY);
+
+      // Using atan2(X, Y) perfectly maps our compass (0 = Forward, 90 = Right)
+      float finalAngle = degrees(atan2(finalX, finalY));
+
+      // 5. Generate the Trajectory using the calculated final speed
+      float liftHeight = (finalSpeed > 5.0) ? 40.0 : 0.0;
+      Vector3 point =
+          generateTrajectory(legPhase, stanceRadius[i], 80.0, finalSpeed,
+                             liftHeight, strideOffsets[i]);
+
+      // 6. Flip the angle for the Left Side, then apply Rotations
+      float localWalkAngle = finalAngle * sideMultiplier[i];
+
+      Vector2 footRestingCenter(stanceRadius[i], strideOffsets[i]);
+      point = point.rotate(localWalkAngle, footRestingCenter);
       point = point.rotate(legRotations[i], shoulderPivot);
+
       legs[i]->setInstantIK(point);
-    }
-  } else {
-    // Run the interpolator for States 1 and 2
-    for (int i = 0; i < 6; i++) {
-      legs[i]->update();
     }
   }
 
