@@ -1,19 +1,22 @@
 #include "Adafruit_PWMServoDriver.h"
 #include "Legs.h"
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include <Arduino.h>
 #include <Bluepad32.h>
 #include <Wire.h>
 #include <math.h>
+
 Adafruit_PWMServoDriver sb2 = Adafruit_PWMServoDriver(0x40);
 Adafruit_PWMServoDriver sb1 = Adafruit_PWMServoDriver(0x41); // bridge A0
 
-// // for serial read
-// int receivedInt = 0;
-// int firstValue = 0;
-// int secondValue = 0;
-// int thirdValue = 0;
-// bool firstReceived = false;
-// bool secondReceived = false;
+// for serial read
+int receivedInt = 0;
+int firstValue = 0;
+int secondValue = 0;
+int thirdValue = 0;
+bool firstReceived = false;
+bool secondReceived = false;
 
 // leg dimentions
 float tibia = 186.44;
@@ -61,6 +64,7 @@ void onDisconnectedController(ControllerPtr ctl) {
 
 // --- Dynamic Gait Engine ---
 int currentGait = 0; // 0 = Tripod, 1 = Ripple, 2 = Wave
+float globalDutyFactor = 0.5;
 float globalPhaseOffsets[6] = {0.0, 0.5, 0.0,
                                0.5, 0.0, 0.5}; // Defaults to Tripod
 String gaitNames[3] = {"TRIPOD", "RIPPLE", "WAVE"};
@@ -72,22 +76,23 @@ void setGait(int gaitIndex) {
   Serial.println(gaitNames[currentGait]);
 
   if (currentGait == 0) {
-    // TRIPOD: 2 Groups of 3
+    globalDutyFactor = 0.5; // TRIPOD: 2 Groups of 3
     float tripod[6] = {0.0, 0.5, 0.0, 0.5, 0.0, 0.5};
     memcpy(globalPhaseOffsets, tripod, sizeof(tripod));
   } else if (currentGait == 1) {
-    // RIPPLE: 3 Groups of 2 (Diagonal Pairs)
+    globalDutyFactor = 0.666;
     float ripple[6] = {0.0, 0.333, 0.666, 0.333, 0.666, 0.0};
     memcpy(globalPhaseOffsets, ripple, sizeof(ripple));
   } else if (currentGait == 2) {
-    // WAVE: Metachronal (One by one, back to front)
+    globalDutyFactor = 0.833;
     float wave[6] = {0.333, 0.166, 0.0, 0.833, 0.666, 0.5};
     memcpy(globalPhaseOffsets, wave, sizeof(wave));
   }
 }
 
 Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
-                           float stepLength, float stepHeight, float yOffset) {
+                           float stepLength, float stepHeight, float yOffset,
+                           float dutyFactor) {
   // Ensure phase stays strictly wrapped between 0.0 and 1.0
   phase = phase - floor(phase);
 
@@ -102,9 +107,10 @@ Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
   // ---------------------------------------------------------
   // SWING PHASE: (0.0 to 0.5) - Foot in the air moving forward
   // ---------------------------------------------------------
-  if (phase < 0.5) {
+  float swingPhase = 1.0 - dutyFactor;
+  if (phase < swingPhase) {
     // Normalize time from 0.0 to 1.0 for the swing curve
-    float t = phase * 2.0;
+    float t = phase / swingPhase;
 
     // Standard linear time for a true Bezier velocity profile
     float u = 1.0 - t;
@@ -137,8 +143,7 @@ Vector3 generateTrajectory(float phase, float defaultX, float standingHeight,
   // ---------------------------------------------------------
   else {
     // Normalize time from 0.0 to 1.0 for the ground pull
-    float t = (phase - 0.5) * 2.0;
-
+    float t = (phase - swingPhase) / dutyFactor;
     // Linear mapping for a perfectly constant chassis speed
     y = yTouchdown - (stepLength * t);
     z = zGround;
@@ -233,8 +238,9 @@ void setup() {
   Serial.println("Initializing Bluepad32...");
   BP32.setup(&onConnectedController, &onDisconnectedController);
   BP32.forgetBluetoothKeys();
+
   // Right Side (Board 1)
-  legs[0] = new Leg(&sb1, 0, 1, 3, 95.0, 110.0 + 23, 22.0 - 20 + 11.3 - 90,
+  legs[0] = new Leg(&sb1, 0, 1, 2, 95.0 - 40, 110.0 + 23, 22.0 - 20 + 11.3 - 90,
                     true, false, true); // Leg 1 (Top-Right)
   legs[1] = new Leg(&sb1, 4, 5, 6, 90.0 - 10, 75.0 + 20, 7.0 - 19 + 11.3 - 90,
                     true, false, true); // Leg 2 (Mid-Right)
@@ -252,89 +258,88 @@ void setup() {
   Serial.println(
       "For Cartesian: C,Leg,X,Y,Z             (e.g., C,0,150,0,-50)");
 }
-//
-// void handleSerialCommands() {
-//   if (Serial.available() > 0) {
-//     String input = Serial.readStringUntil('\n');
-//     input.trim();
-//
-//     char cmdType;
-//     int legIdx;
-//     float v1, v2, v3;
-//
-//     if (sscanf(input.c_str(), "%c,%d,%f,%f,%f", &cmdType, &legIdx, &v1, &v2,
-//                &v3) == 5) {
-//
-//       if (legIdx < 0 || legIdx > 5) {
-//         Serial.println("Error: Leg index must be between 0 and 5.");
-//         return;
-//       }
-//
-//       // 'A' or 'a' for direct Angle control
-//       if (cmdType == 'A' || cmdType == 'a') {
-//         legs[legIdx]->setAngles(v1, v2, v3);
-//         Serial.print("Leg ");
-//         Serial.print(legIdx);
-//         Serial.print(" ANGLES set to -> Coxa: ");
-//         Serial.print(v1);
-//         Serial.print(" | Femur: ");
-//         Serial.print(v2);
-//         Serial.print(" | Tibia: ");
-//         Serial.println(v3);
-//       }
-//       // 'C' or 'c' for Cartesian IK control
-//       else if (cmdType == 'C' || cmdType == 'c') {
-//         legs[legIdx]->setTarget(Vector3(v1, v2, v3), 1000);
-//         Serial.print("Leg ");
-//         Serial.print(legIdx);
-//         Serial.print(" TARGET set to -> X: ");
-//         Serial.print(v1);
-//         Serial.print(" | Y: ");
-//         Serial.print(v2);
-//         Serial.print(" | Z: ");
-//         Serial.println(v3);
-//       }
-//       // 'V' or 'v' for Velocity Control (Omnidirectional + Rotation)
-//       else if (cmdType == 'V' || cmdType == 'v') {
-//         globalWalkAngle = v1;
-//         globalStrideLength = v2;
-//         globalRotationSpeed = v3;
-//
-//         Serial.print("ROBOT VELOCITY -> Angle: ");
-//         Serial.print(globalWalkAngle);
-//         Serial.print(" deg | Speed: ");
-//         Serial.print(globalStrideLength);
-//         Serial.print(" | Rotation: ");
-//         Serial.println(globalRotationSpeed);
-//       }
-//       // 'P' or 'p' for Posture Control (Pitch, Roll, Ride Height)
-//       else if (cmdType == 'P' || cmdType == 'p') {
-//         globalPitch = v1;
-//         globalRoll = v2;
-//         globalRideHeight = v3;
-//
-//         Serial.print("ROBOT POSTURE -> Pitch: ");
-//         Serial.print(globalPitch);
-//         Serial.print(" deg | Roll: ");
-//         Serial.print(globalRoll);
-//         Serial.print(" deg | Ride Height: ");
-//         Serial.println(globalRideHeight);
-//       } else {
-//         Serial.println("Error: Unknown command type. Use A, C, V, or P.");
-//       }
-//
-//     } else {
-//       Serial.println("Invalid format!");
-//       Serial.println("Angles:    A,Leg,Coxa,Femur,Tibia  (e.g.,
-//       A,0,90,90,90)"); Serial.println(
-//           "Cartesian: C,Leg,X,Y,Z             (e.g., C,0,150,0,-50)");
-//       Serial.println("Velocity:  V,0,Angle,Speed,Rot     (e.g.,
-//       V,0,90,100,0)"); Serial.println("Posture:   P,0,Pitch,Roll,Height
-//       (e.g., P,0,15,0,-20)");
-//     }
-//   }
-// }
-//
+
+void handleSerialCommands() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+
+    char cmdType;
+    int legIdx;
+    float v1, v2, v3;
+
+    if (sscanf(input.c_str(), "%c,%d,%f,%f,%f", &cmdType, &legIdx, &v1, &v2,
+               &v3) == 5) {
+
+      if (legIdx < 0 || legIdx > 5) {
+        Serial.println("Error: Leg index must be between 0 and 5.");
+        return;
+      }
+
+      // 'A' or 'a' for direct Angle control
+      if (cmdType == 'A' || cmdType == 'a') {
+        legs[legIdx]->setAngles(v1, v2, v3);
+        Serial.print("Leg ");
+        Serial.print(legIdx);
+        Serial.print(" ANGLES set to -> Coxa: ");
+        Serial.print(v1);
+        Serial.print(" | Femur: ");
+        Serial.print(v2);
+        Serial.print(" | Tibia: ");
+        Serial.println(v3);
+      }
+      // 'C' or 'c' for Cartesian IK control
+      else if (cmdType == 'C' || cmdType == 'c') {
+        legs[legIdx]->setTarget(Vector3(v1, v2, v3), 1000);
+        Serial.print("Leg ");
+        Serial.print(legIdx);
+        Serial.print(" TARGET set to -> X: ");
+        Serial.print(v1);
+        Serial.print(" | Y: ");
+        Serial.print(v2);
+        Serial.print(" | Z: ");
+        Serial.println(v3);
+      }
+      // 'V' or 'v' for Velocity Control (Omnidirectional + Rotation)
+      else if (cmdType == 'V' || cmdType == 'v') {
+        globalWalkAngle = v1;
+        globalStrideLength = v2;
+        globalRotationSpeed = v3;
+
+        Serial.print("ROBOT VELOCITY -> Angle: ");
+        Serial.print(globalWalkAngle);
+        Serial.print(" deg | Speed: ");
+        Serial.print(globalStrideLength);
+        Serial.print(" | Rotation: ");
+        Serial.println(globalRotationSpeed);
+      }
+      // 'P' or 'p' for Posture Control (Pitch, Roll, Ride Height)
+      else if (cmdType == 'P' || cmdType == 'p') {
+        globalPitch = v1;
+        globalRoll = v2;
+        globalRideHeight = v3;
+
+        Serial.print("ROBOT POSTURE -> Pitch: ");
+        Serial.print(globalPitch);
+        Serial.print(" deg | Roll: ");
+        Serial.print(globalRoll);
+        Serial.print(" deg | Ride Height: ");
+        Serial.println(globalRideHeight);
+      } else {
+        Serial.println("Error: Unknown command type. Use A, C, V, or P.");
+      }
+
+    } else {
+      Serial.println("Invalid format!");
+      Serial.println("Angles:    A,Leg,Coxa,Femur,Tibia  (e.g.,A,0,90,90,90)");
+      Serial.println(
+          "Cartesian: C,Leg,X,Y,Z             (e.g., C,0,150,0,-50)");
+      Serial.println("Velocity:  V,0,Angle,Speed,Rot     (e.g.,V,0,90,100,0)");
+      Serial.println("Posture:   P,0,Pitch,Roll,Height   (e.g., P,0,15,0,-20)");
+    }
+  }
+}
+
 void loop() {
   static int sequenceState = 0;
   static unsigned long lastActionTime = 0;
@@ -378,7 +383,8 @@ void loop() {
   // STATE 3: THE WALKING ENGINE
   // ---------------------------------------------------------
   if (sequenceState == 3) {
-    // Calculate the master time phase (Now driven by globalCycleTime from the
+    // Calculate the master time phase (Now driven by globalCycleTime from
+    // the
     // trigger)
     float globalPhase = (float)(millis() % cycleTime) / cycleTime;
 
@@ -421,7 +427,7 @@ void loop() {
       float liftHeight = (finalSpeed > 5.0) ? 40.0 : 0.0;
       Vector3 point =
           generateTrajectory(legPhase, stanceRadius[i], 80.0, finalSpeed,
-                             liftHeight, strideOffsets[i]);
+                             liftHeight, strideOffsets[i], globalDutyFactor);
 
       // 6. Apply Yaw and Leg Rotations
       float localWalkAngle = finalAngle * sideMultiplier[i];
@@ -441,7 +447,8 @@ void loop() {
 
       // B. Calculate lateral chassis sway
       // When the top plate tilts, the robot sways. We shift the feet to keep
-      // the Center of Gravity locked. (point.z is our standing height distance)
+      // the Center of Gravity locked. (point.z is our standing height
+      // distance)
       float shoulder_dX = point.z * sin(rollRad);
       float shoulder_dY = point.z * sin(pitchRad);
 
@@ -459,6 +466,5 @@ void loop() {
       legs[i]->setInstantIK(point);
     }
   }
-
   handleGamepad();
 }
